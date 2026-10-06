@@ -9,9 +9,10 @@ class Settings(BaseSettings):
 
     # --- Required settings even when working locally. ---
 
-    # OpenAI API
+    # OpenAI API (or OpenAI-compatible local endpoint, e.g. llama.cpp on :8001)
     OPENAI_MODEL_ID: str = "gpt-4o-mini"
     OPENAI_API_KEY: str | None = None
+    OPENAI_BASE_URL: str | None = None
 
     # Huggingface API
     HUGGINGFACE_ACCESS_TOKEN: str | None = None
@@ -42,8 +43,17 @@ class Settings(BaseSettings):
 
     # --- Optional settings used to tweak the code. ---
 
+    # Local QLoRA training (RTX 3090)
+    LOCAL_TRAINING: bool = False
+    TRAINING_BASE_MODEL: str = "Qwen/Qwen3-32B"
+    TRAINING_MAX_SEQ_LENGTH: int = 1024
+    TRAINING_OUTPUT_DIR: str = "data/training_output"
+    LOCAL_SFT_DATASET_PATH: str = "data/artifacts/instruct_datasets.json"
+    LOCAL_DPO_DATASET_PATH: str = "data/artifacts/preference_datasets.json"
+    TRAINING_REPORT_TO: str = "none"
+
     # AWS SageMaker
-    HF_MODEL_ID: str = "mlabonne/TwinLlama-3.1-8B-DPO"
+    HF_MODEL_ID: str = "Qwen/Qwen3-32B"
     GPU_INSTANCE_TYPE: str = "ml.g5.2xlarge"
     SM_NUM_GPUS: int = 1
     MAX_INPUT_LENGTH: int = 2048

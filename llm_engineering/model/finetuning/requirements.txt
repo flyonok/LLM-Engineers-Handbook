@@ -1,10 +1,18 @@
-accelerate==0.33.0
-torch==2.4.0
-transformers==4.43.3
-datasets==2.20.0
-peft==0.12.0
-trl==0.9.6
-bitsandbytes==0.43.3
-comet-ml==3.44.3
-flash-attn==2.3.6
-unsloth==2024.9.post2
+# Local / SageMaker fine-tuning environment (Qwen3 + QLoRA via unsloth).
+# Install in a dedicated venv: pip install -r llm_engineering/model/finetuning/requirements.txt
+accelerate>=0.34.0
+
+# Local RTX 3090 with driver 560.35.05 (CUDA 12.6 runtime) needs cu129 wheels.
+# For other CUDA/driver combinations, adjust the +cuXXX suffix and index URL.
+--extra-index-url https://download.pytorch.org/whl/cu129
+torch==2.11.0+cu129
+torchvision==0.26.0+cu129
+
+transformers>=4.51.0,<5
+datasets>=3.0.0
+peft>=0.14.0
+trl>=0.15.0,<0.20
+bitsandbytes>=0.44.0
+comet-ml>=3.44.3
+unsloth>=2025.3.18
+huggingface_hub>=0.27.0

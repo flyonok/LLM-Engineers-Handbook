@@ -8,18 +8,29 @@ from huggingface_hub import HfApi
 from huggingface_hub.utils import RepositoryNotFoundError
 from openai import OpenAI
 from tqdm.auto import tqdm
-from vllm import LLM, SamplingParams
 
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 DATASET_HUGGINGFACE_WORKSPACE = os.environ["DATASET_HUGGINGFACE_WORKSPACE"]
 MODEL_HUGGINGFACE_WORKSPACE = os.environ["MODEL_HUGGINGFACE_WORKSPACE"]
 IS_DUMMY = os.environ.get("IS_DUMMY", False)
 
+# Local OpenAI-compatible endpoint (llama.cpp). Leave unset to use OpenAI API.
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL")
+LOCAL_MODEL_NAME = os.environ.get("LOCAL_MODEL_NAME", "local-model")
+
 print("====== EVAL PARAMETERS ======")  # noqa
 print(f"{DATASET_HUGGINGFACE_WORKSPACE=}")  # noqa
 print(f"{MODEL_HUGGINGFACE_WORKSPACE=}")  # noqa
 print(f"{IS_DUMMY=}")  # noqa
+print(f"{OPENAI_BASE_URL=}")  # noqa
+print(f"{LOCAL_MODEL_NAME=}")  # noqa
 print("=============================")  # noqa
+
+
+def _openai_client() -> OpenAI:
+    if OPENAI_BASE_URL:
+        return OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY or "not-needed")
+    return OpenAI(api_key=OPENAI_API_KEY)
 
 
 def generate_answers(model_id: str, dataset_name: str):
@@ -37,12 +48,23 @@ def generate_answers(model_id: str, dataset_name: str):
     print(f"Dataset size: {len(dataset)}")  # noqa
     dataset = dataset.map(lambda sample: {"prompt": format(sample)})
 
-    print(f"Generating answers for {model_id}")  # noqa
-    llm = LLM(model=model_id, max_model_len=2048)
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, min_p=0.05, max_tokens=2048)
-    outputs = llm.generate(dataset["prompt"], sampling_params)
+    print(f"Generating answers for {model_id} via {OPENAI_BASE_URL or 'OpenAI API'}")  # noqa
+    client = _openai_client()
+    model_name = LOCAL_MODEL_NAME if OPENAI_BASE_URL else model_id
 
-    answers = [output.outputs[0].text for output in outputs]
+    def _generate(prompt: str) -> str:
+        completion = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
+            top_p=0.95,
+            max_tokens=2048,
+        )
+        return completion.choices[0].message.content or ""
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        answers = list(executor.map(_generate, dataset["prompt"]))
+
     dataset = dataset.add_column("answers", answers)
 
     print(f"Uploading results for {model_id}")  # noqa
@@ -87,26 +109,34 @@ Provide your evaluation in JSON format with the following structure:
 }}
 """
 
-    completion = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
+    judge_model = LOCAL_MODEL_NAME if OPENAI_BASE_URL else "gpt-4o-mini"
+    kwargs: dict = {
+        "model": judge_model,
+        "messages": [
             {
                 "role": "system",
                 "content": "You are a helpful assistant who evaluates answers based on accuracy and style. Provide your response in JSON format with a short analysis and score for each criterion.",
             },
             {"role": "user", "content": prompt},
         ],
-        response_format={"type": "json_object"},
-        max_tokens=1000,
-        temperature=0.9,
-    )
+        "max_tokens": 1000,
+        "temperature": 0.9,
+    }
+    if not OPENAI_BASE_URL:
+        kwargs["response_format"] = {"type": "json_object"}
+    completion = client.chat.completions.create(**kwargs)
 
-    # Parse the structured output
-    return json.loads(completion.choices[0].message.content)
+    # Parse the structured output (local endpoints may not support response_format)
+    content = completion.choices[0].message.content or "{}"
+    if "{" not in content:
+        return {"accuracy": {"analysis": "no JSON in output", "score": None}, "style": {"analysis": "no JSON in output", "score": None}}
+    start = content.find("{")
+    end = content.rfind("}") + 1
+    return json.loads(content[start:end])
 
 
 def evaluate_batch(batch, start_index):
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = _openai_client()
     return [(i, evaluate_answer(instr, ans, client)) for i, (instr, ans) in enumerate(batch, start=start_index)]
 
 
@@ -174,7 +204,6 @@ def check_if_huggingface_model_exists(model_id: str, default_value: str) -> str:
     except RepositoryNotFoundError:
         print(f"Model '{model_id}' does not exist.")  # noqa
         model_id = default_value
-        print(f"Defaulting to '{model_id}'")  # noqa
         print("Train your own model to avoid this behavior.")  # noqa
 
     return model_id
@@ -221,8 +250,16 @@ if __name__ == "__main__":
     for model_id in model_ids:
         dataset = load_dataset(f"{DATASET_HUGGINGFACE_WORKSPACE}/{model_id.split('/')[-1]}-results", split="all")
 
-        score = sum(dataset["accuracy"]) / len(dataset["accuracy"])
-        print(f"{model_id.split('/')[-1]} - Accuracy: {score:.2f}")  # noqa
+        accuracy_values = [s for s in dataset["accuracy"] if s is not None]
+        if accuracy_values:
+            score = sum(accuracy_values) / len(accuracy_values)
+            print(f"{model_id.split('/')[-1]} - Accuracy: {score:.2f}")  # noqa
+        else:
+            print(f"{model_id.split('/')[-1]} - Accuracy: n/a")  # noqa
 
-        score = sum(dataset["style"]) / len(dataset["style"])
-        print(f"{model_id.split('/')[-1]} - Style: {score:.2f}")  # noqa
+        style_values = [s for s in dataset["style"] if s is not None]
+        if style_values:
+            score = sum(style_values) / len(style_values)
+            print(f"{model_id.split('/')[-1]} - Style: {score:.2f}")  # noqa
+        else:
+            print(f"{model_id.split('/')[-1]} - Style: n/a")  # noqa

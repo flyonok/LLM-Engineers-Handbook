@@ -8,7 +8,20 @@ settings:
 parameters:
   finetuning_type: sft
   num_train_epochs: 3
-  per_device_train_batch_size: 2
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
   learning_rate: 3e-4
   dataset_huggingface_workspace: mlabonne
-  is_dummy: true # Change this to 'false' to run the training with the full dataset and epochs.
+  is_dummy: true # Change to false for full dataset and epochs.
+
+  # Local RTX 3090 QLoRA (see doc/memo-local-training-plan.md)
+  local: true
+  base_model: Qwen/Qwen3-32B
+  max_seq_length: 1024
+  load_in_4bit: true
+  use_local_datasets: true
+  local_sft_dataset_path: data/artifacts/instruct_datasets.json
+  local_dpo_dataset_path: data/artifacts/preference_datasets.json
+  mix_alpaca_dataset: false
+  report_to: none
+  training_output_dir: data/training_output

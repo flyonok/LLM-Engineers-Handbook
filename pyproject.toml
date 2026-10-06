@@ -87,6 +87,8 @@ run-import-data-warehouse-from-json = "poetry run python -m tools.data_warehouse
 
 # Training pipelines
 run-training-pipeline = "poetry run python -m tools.run --no-cache --run-training"
+run-local-training = "python llm_engineering/model/finetuning/run_local.py --is_dummy"
+run-local-evaluation = "python llm_engineering/model/evaluation/run_local.py --dummy"
 run-evaluation-pipeline = "poetry run python -m tools.run --no-cache --run-evaluation"
 
 # Inference

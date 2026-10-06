@@ -21,6 +21,9 @@ def run_finetuning_on_sagemaker(
     learning_rate: float = 3e-4,
     dataset_huggingface_workspace: str = "mlabonne",
     is_dummy: bool = False,
+    base_model: str = "meta-llama/Llama-3.1-8B",
+    max_seq_length: int = 2048,
+    load_in_4bit: bool = False,
 ) -> None:
     assert settings.HUGGINGFACE_ACCESS_TOKEN, "Hugging Face access token is required."
     assert settings.AWS_ARN_ROLE, "AWS ARN role is required."
@@ -42,7 +45,11 @@ def run_finetuning_on_sagemaker(
         "learning_rate": learning_rate,
         "dataset_huggingface_workspace": dataset_huggingface_workspace,
         "model_output_huggingface_workspace": huggingface_user,
+        "base_model": base_model,
+        "max_seq_length": max_seq_length,
     }
+    if load_in_4bit:
+        hyperparameters["load_in_4bit"] = True
     if is_dummy:
         hyperparameters["is_dummy"] = True
 

@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -9,7 +10,7 @@ PatchDPOTrainer()
 from typing import Any, List, Literal, Optional  # noqa: E402
 
 import torch  # noqa
-from datasets import concatenate_datasets, load_dataset  # noqa: E402
+from datasets import Dataset, concatenate_datasets, load_dataset  # noqa: E402
 from huggingface_hub import HfApi  # noqa: E402
 from huggingface_hub.utils import RepositoryNotFoundError  # noqa: E402
 from transformers import TextStreamer, TrainingArguments  # noqa: E402
@@ -24,6 +25,83 @@ alpaca_template = """Below is an instruction that describes a task. Write a resp
 
 ### Response:
 {}"""
+
+
+def load_instruct_dataset_from_artifacts_json(path: str) -> Dataset:
+    with Path(path).open(encoding="utf-8") as file:
+        data = json.load(file)
+
+    instructions: list[str] = []
+    outputs: list[str] = []
+    for split_name in ("train", "test"):
+        split = data.get(split_name)
+        if not isinstance(split, dict):
+            continue
+        for category_blob in split.values():
+            for sample in category_blob.get("samples", []):
+                instructions.append(sample["instruction"])
+                outputs.append(sample["answer"])
+
+    if not instructions:
+        raise ValueError(f"No instruct samples found in '{path}'")
+
+    return Dataset.from_dict({"instruction": instructions, "output": outputs})
+
+
+def load_preference_dataset_from_artifacts_json(path: str) -> Dataset:
+    with Path(path).open(encoding="utf-8") as file:
+        data = json.load(file)
+
+    prompts: list[str] = []
+    chosen: list[str] = []
+    rejected: list[str] = []
+    for split_name in ("train", "test"):
+        split = data.get(split_name)
+        if not isinstance(split, dict):
+            continue
+        for category_blob in split.values():
+            for sample in category_blob.get("samples", []):
+                prompts.append(sample["instruction"])
+                chosen.append(sample["chosen"])
+                rejected.append(sample["rejected"])
+
+    if not prompts:
+        raise ValueError(f"No preference samples found in '{path}'")
+
+    return Dataset.from_dict({"prompt": prompts, "chosen": chosen, "rejected": rejected})
+
+
+def load_sft_training_dataset(
+    dataset_huggingface_workspace: str,
+    use_local_datasets: bool,
+    local_sft_dataset_path: Optional[str],
+    mix_alpaca_dataset: bool,
+) -> Dataset:
+    if use_local_datasets:
+        if not local_sft_dataset_path:
+            raise ValueError("local_sft_dataset_path is required when use_local_datasets=True")
+        dataset = load_instruct_dataset_from_artifacts_json(local_sft_dataset_path)
+        if mix_alpaca_dataset:
+            alpaca = load_dataset("mlabonne/FineTome-Alpaca-100k", split="train[:10000]")
+            dataset = concatenate_datasets([dataset, alpaca])
+        return dataset
+
+    dataset1 = load_dataset(f"{dataset_huggingface_workspace}/llmtwin", split="train")
+    dataset2 = load_dataset("mlabonne/FineTome-Alpaca-100k", split="train[:10000]")
+    return concatenate_datasets([dataset1, dataset2])
+
+
+def load_dpo_training_dataset(
+    dataset_huggingface_workspace: str,
+    use_local_datasets: bool,
+    local_dpo_dataset_path: Optional[str],
+) -> Dataset:
+    if use_local_datasets:
+        if not local_dpo_dataset_path:
+            raise ValueError("local_dpo_dataset_path is required when use_local_datasets=True")
+        return load_preference_dataset_from_artifacts_json(local_dpo_dataset_path)
+
+    return load_dataset(f"{dataset_huggingface_workspace}/llmtwin-dpo", split="train")
 
 
 def load_model(
@@ -76,6 +154,11 @@ def finetune(
     gradient_accumulation_steps: int = 8,
     beta: float = 0.5,  # Only for DPO
     is_dummy: bool = True,
+    use_local_datasets: bool = False,
+    local_sft_dataset_path: Optional[str] = None,
+    local_dpo_dataset_path: Optional[str] = None,
+    mix_alpaca_dataset: bool = True,
+    report_to: str = "comet_ml",
 ) -> tuple:
     model, tokenizer = load_model(
         model_name, max_seq_length, load_in_4bit, lora_rank, lora_alpha, lora_dropout, target_modules, chat_template
@@ -86,7 +169,7 @@ def finetune(
     if is_dummy is True:
         num_train_epochs = 1
         print(f"Training in dummy mode. Setting num_train_epochs to '{num_train_epochs}'")  # noqa
-        print(f"Training in dummy mode. Reducing dataset size to '400'.")  # noqa
+        print("Training in dummy mode. Reducing dataset size to '400'.")  # noqa
 
     if finetuning_type == "sft":
 
@@ -98,9 +181,12 @@ def finetune(
 
             return {"text": text}
 
-        dataset1 = load_dataset(f"{dataset_huggingface_workspace}/llmtwin", split="train")
-        dataset2 = load_dataset("mlabonne/FineTome-Alpaca-100k", split="train[:10000]")
-        dataset = concatenate_datasets([dataset1, dataset2])
+        dataset = load_sft_training_dataset(
+            dataset_huggingface_workspace,
+            use_local_datasets,
+            local_sft_dataset_path,
+            mix_alpaca_dataset,
+        )
         if is_dummy:
             try:
                 dataset = dataset.select(range(400))
@@ -137,7 +223,7 @@ def finetune(
                 per_device_eval_batch_size=per_device_train_batch_size,
                 warmup_steps=10,
                 output_dir=output_dir,
-                report_to="comet_ml",
+                report_to=report_to if report_to != "none" else "none",
                 seed=0,
             ),
         )
@@ -151,7 +237,11 @@ def finetune(
 
             return {"prompt": example["prompt"], "chosen": example["chosen"], "rejected": example["rejected"]}
 
-        dataset = load_dataset(f"{dataset_huggingface_workspace}/llmtwin-dpo", split="train")
+        dataset = load_dpo_training_dataset(
+            dataset_huggingface_workspace,
+            use_local_datasets,
+            local_dpo_dataset_path,
+        )
         if is_dummy:
             try:
                 dataset = dataset.select(range(400))
@@ -189,7 +279,7 @@ def finetune(
                 output_dir=output_dir,
                 eval_steps=0.2,
                 logging_steps=1,
-                report_to="comet_ml",
+                report_to=report_to if report_to != "none" else "none",
                 seed=0,
             ),
         )
@@ -216,6 +306,7 @@ def inference(
 
 
 def save_model(model: Any, tokenizer: Any, output_dir: str, push_to_hub: bool = False, repo_id: Optional[str] = None):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     model.save_pretrained_merged(output_dir, tokenizer, save_method="merged_16bit")
 
     if push_to_hub and repo_id:
@@ -242,10 +333,11 @@ if __name__ == "__main__":
 
     parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--per_device_train_batch_size", type=int, default=2)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--dataset_huggingface_workspace", type=str, default="mlabonne")
     parser.add_argument("--model_output_huggingface_workspace", type=str, default="mlabonne")
-    parser.add_argument("--is_dummy", type=bool, default=False, help="Flag to reduce the dataset size for testing")
+    parser.add_argument("--is_dummy", action="store_true", help="Reduce the dataset size for testing")
     parser.add_argument(
         "--finetuning_type",
         type=str,
@@ -253,10 +345,23 @@ if __name__ == "__main__":
         default="sft",
         help="Parameter to choose the finetuning stage.",
     )
+    parser.add_argument("--base_model", type=str, default="meta-llama/Llama-3.1-8B")
+    parser.add_argument("--max_seq_length", type=int, default=2048)
+    parser.add_argument("--load_in_4bit", action="store_true")
+    parser.add_argument("--use_local_datasets", action="store_true")
+    parser.add_argument("--local_sft_dataset_path", type=str, default=None)
+    parser.add_argument("--local_dpo_dataset_path", type=str, default=None)
+    parser.add_argument("--mix_alpaca_dataset", action="store_true")
+    parser.add_argument("--report_to", type=str, default="comet_ml")
+    parser.add_argument("--push_to_hub", action="store_true")
 
-    parser.add_argument("--output_data_dir", type=str, default=os.environ["SM_OUTPUT_DATA_DIR"])
-    parser.add_argument("--model_dir", type=str, default=os.environ["SM_MODEL_DIR"])
-    parser.add_argument("--n_gpus", type=str, default=os.environ["SM_NUM_GPUS"])
+    parser.add_argument(
+        "--output_data_dir",
+        type=str,
+        default=os.environ.get("SM_OUTPUT_DATA_DIR", "./data/training_output"),
+    )
+    parser.add_argument("--model_dir", type=str, default=os.environ.get("SM_MODEL_DIR", "./data/training_output"))
+    parser.add_argument("--n_gpus", type=str, default=os.environ.get("SM_NUM_GPUS", "1"))
 
     args = parser.parse_args()
 
@@ -274,42 +379,70 @@ if __name__ == "__main__":
 
     if args.finetuning_type == "sft":
         print("Starting SFT training...")  # noqa
-        base_model_name = "meta-llama/Llama-3.1-8B"
-        print(f"Training from base model '{base_model_name}'")  # noqa
+        print(f"Training from base model '{args.base_model}'")  # noqa
 
         output_dir_sft = Path(args.model_dir) / "output_sft"
         model, tokenizer = finetune(
             finetuning_type="sft",
-            model_name=base_model_name,
+            model_name=args.base_model,
             output_dir=str(output_dir_sft),
             dataset_huggingface_workspace=args.dataset_huggingface_workspace,
+            max_seq_length=args.max_seq_length,
+            load_in_4bit=args.load_in_4bit,
             num_train_epochs=args.num_train_epochs,
             per_device_train_batch_size=args.per_device_train_batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
             learning_rate=args.learning_rate,
+            use_local_datasets=args.use_local_datasets,
+            local_sft_dataset_path=args.local_sft_dataset_path,
+            mix_alpaca_dataset=args.mix_alpaca_dataset,
+            report_to=args.report_to,
+            is_dummy=args.is_dummy,
         )
         inference(model, tokenizer)
 
         sft_output_model_repo_id = f"{args.model_output_huggingface_workspace}/TwinLlama-3.1-8B"
-        save_model(model, tokenizer, "model_sft", push_to_hub=True, repo_id=sft_output_model_repo_id)
+        save_model(
+            model,
+            tokenizer,
+            str(Path(args.model_dir) / "model_sft"),
+            push_to_hub=args.push_to_hub,
+            repo_id=sft_output_model_repo_id if args.push_to_hub else None,
+        )
     elif args.finetuning_type == "dpo":
         print("Starting DPO training...")  # noqa
 
         sft_base_model_repo_id = f"{args.model_output_huggingface_workspace}/TwinLlama-3.1-8B"
-        sft_base_model_repo_id = check_if_huggingface_model_exists(sft_base_model_repo_id)
-        print(f"Training from base model '{sft_base_model_repo_id}'")  # noqa
+        if args.use_local_datasets and args.local_sft_dataset_path:
+            sft_base_model = str(Path(args.model_dir) / "model_sft")
+        else:
+            sft_base_model = check_if_huggingface_model_exists(sft_base_model_repo_id)
+        print(f"Training from base model '{sft_base_model}'")  # noqa
 
         output_dir_dpo = Path(args.model_dir) / "output_dpo"
         model, tokenizer = finetune(
             finetuning_type="dpo",
-            model_name=sft_base_model_repo_id,
+            model_name=sft_base_model,
             output_dir=str(output_dir_dpo),
             dataset_huggingface_workspace=args.dataset_huggingface_workspace,
+            max_seq_length=args.max_seq_length,
+            load_in_4bit=args.load_in_4bit,
             num_train_epochs=1,
             per_device_train_batch_size=args.per_device_train_batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
             learning_rate=2e-6,
+            use_local_datasets=args.use_local_datasets,
+            local_dpo_dataset_path=args.local_dpo_dataset_path,
+            report_to=args.report_to,
             is_dummy=args.is_dummy,
         )
         inference(model, tokenizer)
 
         dpo_output_model_repo_id = f"{args.model_output_huggingface_workspace}/TwinLlama-3.1-8B-DPO"
-        save_model(model, tokenizer, "model_dpo", push_to_hub=True, repo_id=dpo_output_model_repo_id)
+        save_model(
+            model,
+            tokenizer,
+            str(Path(args.model_dir) / "model_dpo"),
+            push_to_hub=args.push_to_hub,
+            repo_id=dpo_output_model_repo_id if args.push_to_hub else None,
+        )
