@@ -16,3 +16,8 @@ bitsandbytes>=0.44.0
 comet-ml>=3.44.3
 unsloth>=2025.3.18
 huggingface_hub>=0.27.0
+
+# Local entrypoint / evaluation helpers
+loguru>=0.7.0
+pydantic-settings>=2.0.0
+openai>=1.0.0

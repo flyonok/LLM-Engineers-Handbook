@@ -113,35 +113,42 @@ python scripts/verify_sft_model.py \
 
 - [ ] **Step 1: 转换 F16 GGUF**
 
+> 磁盘调整：repo 根目录仅剩 ~38GB，F16 GGUF 约 16.4GB，量化后还要约 5GB。为留出安全余量，F16 中间文件写入 `/mnt/aitools/tmp/`（该挂载点有 600GB+ 空闲），最终 Q4_K_M 再落回 `data/training_output/`。
+
 ```bash
+mkdir -p /mnt/aitools/tmp
 LLAMA_CPP=/mnt/aitools/src/llama.cpp-ddd4ec1428a6201e18975ea52b07c71e0f9aef26
 python "$LLAMA_CPP/convert_hf_to_gguf.py" \
   data/training_output/dpo_merged \
-  --outfile data/training_output/dpo_merged-F16.gguf \
+  --outfile /mnt/aitools/tmp/dpo_merged-F16.gguf \
   --outtype f16
 ```
 
-**Expected:** 命令退出码 0，生成 `dpo_merged-F16.gguf`。
+**Expected:** 命令退出码 0，生成 `/mnt/aitools/tmp/dpo_merged-F16.gguf`。
 
 - [ ] **Step 2: 量化 Q4_K_M**
 
+> 实际发现 `/mnt/aitools/src/llama.cpp-.../build/bin/llama-quantize` 不存在；使用 `/mnt/aitools/llama-dflash-pr/build/bin/llama-quantize` 完成量化。
+
 ```bash
-LLAMA_CPP=/mnt/aitools/src/llama.cpp-ddd4ec1428a6201e18975ea52b07c71e0f9aef26
-"$LLAMA_CPP/build/bin/llama-quantize" \
-  data/training_output/dpo_merged-F16.gguf \
+LLAMA_QUANTIZE=/mnt/aitools/llama-dflash-pr/build/bin/llama-quantize
+"$LLAMA_QUANTIZE" \
+  /mnt/aitools/tmp/dpo_merged-F16.gguf \
   data/training_output/dpo_merged-Q4_K_M.gguf \
   Q4_K_M
 ```
 
-**Expected:** 命令退出码 0，生成 `dpo_merged-Q4_K_M.gguf`。
+**Expected:** 命令退出码 0，生成 `data/training_output/dpo_merged-Q4_K_M.gguf`。
 
-- [ ] **Step 3: 验证文件大小**
+- [ ] **Step 3: 清理 F16 中间文件并验证 Q4_K_M 大小**
 
 ```bash
-ls -lh data/training_output/dpo_merged*.gguf
+rm -f /mnt/aitools/tmp/dpo_merged-F16.gguf
+ls -lh data/training_output/dpo_merged-Q4_K_M.gguf
+df -h .
 ```
 
-**Expected:** F16 ~16 GB，Q4_K_M ~4–5 GB。
+**Expected:** Q4_K_M ~4–5 GB，repo 根目录剩余空间明显回升。
 
 ---
 
@@ -268,21 +275,29 @@ curl -s http://127.0.0.1:8001/v1/chat/completions \
 ## Task 5: 端点评估
 
 **Files:**
-- 无新增/修改
+- 创建：`scripts/evaluate_local_endpoint.py`
 
-- [ ] **Step 1: 运行本地评估**
+> 原 `llm_engineering/model/evaluation/run_local.py` 会强制 push 结果到 HuggingFace，本地-only 运行 401。新增轻量脚本，直接调用本地端点生成 + 评判，结果落盘。
+
+- [ ] **Step 1: 编写本地评估脚本**
+
+创建 `scripts/evaluate_local_endpoint.py`：
+
+```python
+# 加载本地 instruct 数据集
+# 调用 OpenAI 兼容端点生成答案
+# 调用同一端点做 accuracy / style 评判
+# 保存 results 到 data/training_output/local_eval_results.json
+```
+
+- [ ] **Step 2: 运行本地评估**
 
 ```bash
 source .venv-train/bin/activate
-export OPENAI_BASE_URL=http://127.0.0.1:8001/v1
-export LOCAL_MODEL_NAME=qwen3-8b-dpo-q4km
-export OPENAI_API_KEY=not-needed
-export DATASET_HUGGINGFACE_WORKSPACE=local
-export MODEL_HUGGINGFACE_WORKSPACE=local
-python llm_engineering/model/evaluation/run_local.py --dummy
+python scripts/evaluate_local_endpoint.py --n_samples 10 --max_tokens 256
 ```
 
-**Expected:** 脚本退出码 0，输出包含生成与评判结果。
+**Expected:** 脚本退出码 0，输出平均 accuracy / style。
 
 ---
 

@@ -122,67 +122,107 @@ OOM 时：先试 `--max_seq_length 1024`（默认已是）；仍 OOM 换 `Qwen/Q
 ```bash
 python llm_engineering/model/finetuning/run_local.py \
   --finetuning_type dpo \
-  --base_model Qwen/Qwen3-32B \
+  --base_model /home/ubuntu/vllm/Qwen3-8B \
   --max_seq_length 1024 \
   --per_device_train_batch_size 1 \
   --gradient_accumulation_steps 16 \
   --use_local_datasets \
   --local_dpo_dataset_path data/artifacts/preference_datasets.json \
   --sft_merged_model_dir data/training_output/sft_merged \
-  --report_to none
+  --output_dir data/training_output \
+  --report_to none \
+  --is_dummy   # 验证管道；全量 DPO 去掉此参数
 ```
 
 输出：`data/training_output/dpo_merged/`
 
 ## 6. 转 GGUF
 
-```bash
-# llama.cpp（本机已装；如未装：git clone --depth 1 https://github.com/ggml-org/llama.cpp && cmake -B build -DGGML_CUDA=on && cmake --build build --config Release -j)
-LLAMA_CPP=/path/to/llama.cpp   # 改成你的路径
+> 磁盘注意：repo 根目录若空间紧张（< 50GB），可把 F16 中间文件放到 `/mnt/aitools/tmp/` 等大容量挂载点，量化完再删除。
 
-# SFT 或 DPO 合并 16bit → GGUF
-python $LLAMA_CPP/convert_hf_to_gguf.py \
+```bash
+# 本机实际路径（convert 与 quantize 可能在不同构建目录）
+LLAMA_CPP=/mnt/aitools/src/llama.cpp-ddd4ec1428a6201e18975ea52b07c71e0f9aef26
+LLAMA_QUANTIZE=/mnt/aitools/llama-dflash-pr/build/bin/llama-quantize
+
+# SFT 或 DPO 合并 16bit → F16 GGUF
+python "$LLAMA_CPP/convert_hf_to_gguf.py" \
   data/training_output/dpo_merged \
-  --outfile data/training_output/dpo_merged-F16.gguf \
+  --outfile /mnt/aitools/tmp/dpo_merged-F16.gguf \
   --outtype f16
 
 # 量化 Q4_K_M（与现有推理服务一致）
-$LLAMA_CPP/build/bin/llama-quantize \
-  data/training_output/dpo_merged-F16.gguf \
+"$LLAMA_QUANTIZE" \
+  /mnt/aitools/tmp/dpo_merged-F16.gguf \
   data/training_output/dpo_merged-Q4_K_M.gguf \
   Q4_K_M
+
+# 清理 F16 中间文件
+rm /mnt/aitools/tmp/dpo_merged-F16.gguf
 ```
 
 ## 7. 部署回推理服务
 
+### 7a. 临时验证（不改 systemd）
+
+训练刚完成时，先用独立进程启动验证，确认 GGUF 可用：
+
 ```bash
-# 停服务 → 备份旧 GGUF → 替换 → 启动
-sudo systemctl stop llama-qwen38-27b
+nohup ./scripts/run_llama_server_manual.sh > /tmp/llama_qwen3_8b_dpo.log 2>&1 &
+echo $! > /tmp/llama_qwen3_8b_dpo.pid
+sleep 15
 
-# 找到服务当前指向的模型路径（systemd unit 或 llama.cpp 启动脚本）
-sudo systemctl cat llama-qwen38-27b | grep -E 'ExecStart|WorkingDirectory'
-
-# 例（按实际路径替换）：
-sudo cp /path/to/old/Qwen3.8-27B-Q4_K_M.gguf /path/to/old/Qwen3.8-27B-Q4_K_M.gguf.bak
-sudo cp data/training_output/dpo_merged-Q4_K_M.gguf /path/to/models/
-
-sudo systemctl start llama-qwen38-27b
 curl -s http://127.0.0.1:8001/v1/models
+curl -s http://127.0.0.1:8001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "qwen3-8b-dpo-q4km", "messages": [{"role": "user", "content": "你好"}]}'
 ```
 
-建议后续把服务改名为 `llama-qwen3-32b.service`（备忘录 §3.9，可选）。
+> 临时服务使用与 `llama-qwen38-27b.service` 相同的 `llama-server` 二进制，但不走 systemctl。
+
+### 7b. 生产部署（需 sudo）
+
+现有 `llama-qwen38-27b.service` 对 GGUF 文件做了 **SHA-256 + 文件大小强校验**，不能直接 `cp` 替换。需要修改启动脚本 `/usr/local/lib/voxsign/run_llama_qwen38_27b.sh` 中的：
+
+- `model_path`
+- `expected_model_size`
+- `expected_model_sha`
+
+然后：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart llama-qwen38-27b
+```
+
+或新建一个 service（推荐，避免改旧脚本）：
+
+```bash
+sudo cp /etc/systemd/system/llama-qwen38-27b.service /etc/systemd/system/llama-qwen3-8b.service
+# 编辑新 service，指向新 GGUF 与新启动脚本
+sudo systemctl daemon-reload
+sudo systemctl enable --now llama-qwen3-8b
+```
 
 ## 8. 评估（可选，走 :8001）
 
-```bash
-# 部署新 GGUF 后，用同一端点做生成 + judge
-export OPENAI_BASE_URL=http://127.0.0.1:8001/v1
-export LOCAL_MODEL_NAME=local-model
-export OPENAI_API_KEY=not-needed
-export DATASET_HUGGINGFACE_WORKSPACE=local
-export MODEL_HUGGINGFACE_WORKSPACE=local
+原 `llm_engineering/model/evaluation/run_local.py` 强依赖 HuggingFace 推送，本地-only 运行会 401。新增脚本可直接评估本地端点：
 
-python llm_engineering/model/evaluation/run_local.py --dummy   # 或去掉 --dummy
+```bash
+# 确保 :8001 已启动（临时服务或 systemd 服务）
+python scripts/evaluate_local_endpoint.py --n_samples 10 --max_tokens 256
+```
+
+结果保存到 `data/training_output/local_eval_results.json`，并打印平均 accuracy / style。
+
+如需使用原 HF 流程：
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8001/v1
+export LOCAL_MODEL_NAME=qwen3-8b-dpo-q4km
+export OPENAI_API_KEY=not-needed
+# 需配置 HF token 并确保 workspace 存在
+python llm_engineering/model/evaluation/run_local.py --dummy
 ```
 
 ## 9. 故障速查

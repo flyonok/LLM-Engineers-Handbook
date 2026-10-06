@@ -295,11 +295,116 @@ python llm_engineering/model/finetuning/run_local.py \
 
 ### 5.5 后续待办
 
-1. 用户执行 `sudo systemctl start llama-qwen38-27b` 恢复推理服务。
-2. DPO：基于 `data/training_output/sft_merged` 跑 `finetuning_type=dpo`。
-3. GGUF 转换与量化（`llama.cpp`）。
-4. 替换推理服务 GGUF，建议同步把服务名改为 `llama-qwen3-32b`（或当前实际使用的 8B）。
-5. 评估：用 `llm_engineering/model/evaluation/run_local.py` 调本地端点验证。
+1. ~~DPO：基于 `data/training_output/sft_merged` 跑 `finetuning_type=dpo`~~ ✅
+2. ~~GGUF 转换与量化（`llama.cpp`）~~ ✅
+3. ~~临时启动验证服务并跑评估~~ ✅
+4. 把新 GGUF 永久换进 `llama-qwen38-27b.service`（需 sudo）。
+5. 用户执行 `sudo systemctl start llama-qwen38-27b` 恢复生产推理服务。
+6. 可选：切换到 `Qwen3-8B-Instruct` 基础版以避免 `<think>` 思考标签。
+
+---
+
+## 第六部分：本地训练闭环实测结果（2026-10-06）
+
+### 6.1 DPO 训练
+
+命令：
+
+```bash
+source .venv-train/bin/activate
+export PYTHONPATH=.
+python llm_engineering/model/finetuning/run_local.py \
+  --finetuning_type dpo \
+  --base_model /home/ubuntu/vllm/Qwen3-8B \
+  --max_seq_length 1024 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --num_train_epochs 3 \
+  --use_local_datasets \
+  --local_dpo_dataset_path data/artifacts/preference_datasets.json \
+  --sft_merged_model_dir data/training_output/sft_merged \
+  --output_dir data/training_output \
+  --report_to none \
+  --is_dummy
+```
+
+结果：
+
+- 训练完成：24 steps / 1 epoch（dummy），`train_runtime=183.90s`，`train_loss=0.6960`
+- Loss 从 ~0.75 降到 ~0.65，reward margins 逐步改善
+- 合并模型输出：`data/training_output/dpo_merged/`，约 16 GB
+
+### 6.2 GGUF 转换与量化
+
+因 repo 根目录磁盘仅剩 ~38GB，F16 中间文件写入 `/mnt/aitools/tmp/`，最终 Q4_K_M 落回项目目录。
+
+```bash
+# F16 转换
+python /mnt/aitools/src/llama.cpp-ddd4ec1428a6201e18975ea52b07c71e0f9aef26/convert_hf_to_gguf.py \
+  data/training_output/dpo_merged \
+  --outfile /mnt/aitools/tmp/dpo_merged-F16.gguf \
+  --outtype f16
+
+# 量化 Q4_K_M（实际使用的 llama-quantize 在 llama-dflash-pr 构建中）
+/mnt/aitools/llama-dflash-pr/build/bin/llama-quantize \
+  /mnt/aitools/tmp/dpo_merged-F16.gguf \
+  data/training_output/dpo_merged-Q4_K_M.gguf \
+  Q4_K_M
+
+# 清理 F16
+rm /mnt/aitools/tmp/dpo_merged-F16.gguf
+```
+
+结果：
+
+- `dpo_merged-Q4_K_M.gguf`：4.7 GB
+- 可正常被 `llama-server` 加载
+
+### 6.3 临时服务验证
+
+脚本：`scripts/run_llama_server_manual.sh`
+
+```bash
+nohup ./scripts/run_llama_server_manual.sh > /tmp/llama_qwen3_8b_dpo.log 2>&1 &
+echo $! > /tmp/llama_qwen3_8b_dpo.pid
+```
+
+验证：
+
+- `curl http://127.0.0.1:8001/v1/models` 返回模型 `qwen3-8b-dpo-q4km`
+- `v1/chat/completions` 可生成中文回复，推理速度约 130 tok/s
+- 服务端日志有警告：ctx-size 131072 超过模型训练上下文 40960，已自动 cap；mlock 因普通用户权限失败，不影响功能
+
+### 6.4 本地评估
+
+原 `llm_engineering/model/evaluation/run_local.py` 强依赖 HuggingFace 推送，不适合本地-only。新增 `scripts/evaluate_local_endpoint.py`：
+
+```bash
+python scripts/evaluate_local_endpoint.py --n_samples 10 --max_tokens 256
+```
+
+结果：
+
+- 从 `data/artifacts/instruct_datasets.json` 采样 10 条
+- 平均 accuracy：4.44 / 5
+- 平均 style：4.56 / 5
+- 结果保存：`data/training_output/local_eval_results.json`
+
+### 6.5 生产部署交接
+
+新 GGUF 路径：
+
+```
+/home/ubuntu/amplifier/git/LLM-Engineers-Handbook/data/training_output/dpo_merged-Q4_K_M.gguf
+```
+
+由于现有 `llama-qwen38-27b.service` 对 GGUF 文件做了 SHA-256 + 大小强校验，不能直接替换。需要用户 sudo 修改 `/usr/local/lib/voxsign/run_llama_qwen38_27b.sh` 中的 `model_path`、`expected_model_size`、`expected_model_sha`，或新建一个 service。
+
+临时服务停止命令：
+
+```bash
+kill $(cat /tmp/llama_qwen3_8b_dpo.pid)
+```
 
 ---
 
