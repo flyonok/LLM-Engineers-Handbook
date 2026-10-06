@@ -1,7 +1,7 @@
 # 项目改造备忘录：本地化训练 + 国内环境适配 + 公开数据策略
 
 > 创建日期：2026-10-03
-> 状态：**代码改造已落地**（本地训练路径 + 国内环境适配配置；评估脚本与 GGUF 部署步骤仍按备忘录暂缓）
+> 状态：**本地 Dummy SFT 已跑通**（Qwen3-8B，QLoRA，合并 16bit 已落盘；DPO/GGUF/部署待完成）
 > 用途：记录本次讨论的全部结论与改造方案，作为后续改进项目的依据
 
 ---
@@ -244,6 +244,62 @@ torch==2.4.0 / transformers==4.43.3 / trl==0.9.6 / unsloth==2024.9.post2 / peft=
 阶段 4 RAG 与推理服务
   └─ run-inference-ml-service（FastAPI + RAG，LLM 调用指向本地端点）
 ```
+
+---
+
+## 第五部分：本地 Dummy SFT 实测结果（2026-10-06）
+
+### 5.1 环境
+
+- 训练 venv：`.venv-train`（独立，未污染 Poetry 主环境）
+- torch：`2.11.0+cu129`（原 `2.4.0+cu130` 与驱动 560.35.05 / CUDA 12.6 runtime 不兼容，CUDA 不可用）
+- unsloth / transformers / trl：升级到支持 Qwen3 的最新版（见 `llm_engineering/model/finetuning/requirements.txt` 实际修改）
+- 额外补装：`loguru`、`pydantic-settings`、`zenml[local]`、`modelscope`
+
+### 5.2 代码关键改动
+
+- `llm_engineering/model/finetuning/requirements.txt`：锁定 cu129 轮子 + 新版 unsloth/transformers/trl。
+- `llm_engineering/model/finetuning/run_local.py`：新增本地入口，直接 `importlib` 加载 `finetune.py`，避免触发 `llm_engineering/__init__.py` 全量导入 MongoDB/Qdrant；`settings` 导入失败时回退默认值；monkey-patch `get_model_name` 强制使用传入模型 ID，避免 hf-mirror 对预量化变体下载卡死。
+- `.gitignore`：增加 `.venv-train/`、`.train-libs/`、`unsloth_compiled_cache/`、`data/training_output/`。
+
+### 5.3 实测命令
+
+```bash
+sudo systemctl stop llama-qwen38-27b
+source .venv-train/bin/activate
+export PYTHONPATH=.
+python llm_engineering/model/finetuning/run_local.py \
+  --finetuning_type sft \
+  --base_model /home/ubuntu/vllm/Qwen3-8B \
+  --max_seq_length 1024 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --num_train_epochs 3 \
+  --use_local_datasets \
+  --local_sft_dataset_path data/artifacts/instruct_datasets.json \
+  --output_dir data/training_output \
+  --report_to none \
+  --is_dummy
+```
+
+> 说明：原计划目标基座为 `Qwen/Qwen3-32B`，但 hf-mirror 下载预计 30–50 小时；本机已有完整 `Qwen/Qwen3-8B` 权重（`/home/ubuntu/vllm/Qwen3-8B`），因此先用 8B 验证整条管道。32B 全量训练待后续下载或拷贝权重后再跑。
+
+### 5.4 结果
+
+- 训练完成：24 steps / 1 epoch（dummy 模式实际 1 epoch），`train_runtime=165.96s`，`train_loss=1.1472`。
+- Loss 从 `1.9932` 降到 `0.7766`；生成测试可输出通顺段落。
+- 合并 16bit 完成，输出目录：`data/training_output/sft_merged/`
+  - 大小：约 16 GB
+  - 文件：5 个 `model-0000x-of-00005.safetensors` + tokenizer / config
+- GPU 空闲，无残留进程，可继续下一步。
+
+### 5.5 后续待办
+
+1. 用户执行 `sudo systemctl start llama-qwen38-27b` 恢复推理服务。
+2. DPO：基于 `data/training_output/sft_merged` 跑 `finetuning_type=dpo`。
+3. GGUF 转换与量化（`llama.cpp`）。
+4. 替换推理服务 GGUF，建议同步把服务名改为 `llama-qwen3-32b`（或当前实际使用的 8B）。
+5. 评估：用 `llm_engineering/model/evaluation/run_local.py` 调本地端点验证。
 
 ---
 

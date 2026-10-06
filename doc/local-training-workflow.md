@@ -98,7 +98,7 @@ python llm_engineering/model/finetuning/run_local.py \
 sudo systemctl start llama-qwen38-27b
 ```
 
-成功标志：`data/training_output/sft_merged/` 出现 `model.safetensors`。
+成功标志：`data/training_output/sft_merged/` 出现 `model-0000x-of-00005.safetensors` 等分片 + tokenizer/config。
 
 ## 4. 全量 SFT
 
