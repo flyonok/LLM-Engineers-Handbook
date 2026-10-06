@@ -33,6 +33,30 @@ You can download and use the final trained model on [Hugging Face](https://huggi
 > [!IMPORTANT]
 > The code in this GitHub repository is actively maintained and may contain updates not reflected in the book. **Always refer to this repository for the latest version of the code.**
 
+## 🏠 本地训练（RTX 3090 + Qwen3）
+
+本仓库已适配 **本地 RTX 3090 24GB** 完成 QLoRA SFT/DPO 训练，无需 AWS SageMaker：
+
+- 训练基座：`Qwen/Qwen3-8B`（可切换 `Qwen/Qwen3-32B`）
+- 训练入口：`llm_engineering/model/finetuning/run_local.py`
+- 输出：`data/training_output/sft_merged/` 和 `data/training_output/dpo_merged/`
+- 部署：转 GGUF 后接入本地 llama.cpp 服务（`:8001`）
+
+详细操作文档：
+
+- `doc/local-training-workflow.md` —— 分步操作清单
+- `doc/memo-local-training-plan.md` —— 设计决策与实测结果
+
+快速验证已训练模型：
+
+```bash
+# 临时启动验证服务
+./scripts/run_llama_server_manual.sh
+
+# 本地端点评估
+python scripts/evaluate_local_endpoint.py --n_samples 10
+```
+
 ## 🔗 Dependencies
 
 ### Local dependencies
@@ -73,12 +97,20 @@ Here is the directory overview:
 .
 ├── code_snippets/       # Standalone example code
 ├── configs/             # Pipeline configuration files
+├── doc/                 # 本地训练与部署文档
+│   ├── local-training-workflow.md
+│   └── memo-local-training-plan.md
 ├── llm_engineering/     # Core project package
 │   ├── application/    
 │   ├── domain/         
 │   ├── infrastructure/ 
 │   ├── model/         
 ├── pipelines/           # ML pipeline definitions
+├── scripts/             # 本地训练/验证脚本
+│   ├── local_dummy_sft.sh
+│   ├── run_llama_server_manual.sh
+│   ├── verify_sft_model.py
+│   └── evaluate_local_endpoint.py
 ├── steps/               # Pipeline components
 ├── tests/               # Test examples
 ├── tools/               # Utility scripts
@@ -557,6 +589,8 @@ You can configure what artifacts to export by tweaking the `configs/export_artif
 
 ### Training pipelines
 
+#### 云端 SageMaker（原书路径）
+
 Run the training pipeline:
 ```bash
 poetry poe run-training-pipeline
@@ -569,6 +603,48 @@ poetry poe run-evaluation-pipeline
 
 > [!WARNING]
 > For this to work, make sure you properly configured AWS SageMaker as described in [Set up cloud infrastructure (for production)](#set-up-cloud-infrastructure-for-production).
+
+#### 本地 RTX 3090（QLoRA）
+
+```bash
+# Dummy SFT（验证管道）
+./scripts/local_dummy_sft.sh
+
+# 全量 SFT
+IS_DUMMY=false ./scripts/local_dummy_sft.sh
+
+# DPO
+python llm_engineering/model/finetuning/run_local.py \
+  --finetuning_type dpo \
+  --base_model /home/ubuntu/vllm/Qwen3-8B \
+  --max_seq_length 1024 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --use_local_datasets \
+  --local_dpo_dataset_path data/artifacts/preference_datasets.json \
+  --sft_merged_model_dir data/training_output/sft_merged \
+  --output_dir data/training_output \
+  --report_to none
+
+# 转 GGUF + 量化（路径按实际调整）
+python /mnt/aitools/src/llama.cpp-ddd4ec1428a6201e18975ea52b07c71e0f9aef26/convert_hf_to_gguf.py \
+  data/training_output/dpo_merged \
+  --outfile /mnt/aitools/tmp/dpo_merged-F16.gguf \
+  --outtype f16
+
+/mnt/aitools/llama-dflash-pr/build/bin/llama-quantize \
+  /mnt/aitools/tmp/dpo_merged-F16.gguf \
+  data/training_output/dpo_merged-Q4_K_M.gguf \
+  Q4_K_M
+
+# 临时启动验证服务
+./scripts/run_llama_server_manual.sh
+
+# 本地评估
+python scripts/evaluate_local_endpoint.py --n_samples 10
+```
+
+详细说明见 `doc/local-training-workflow.md` 与 `doc/memo-local-training-plan.md`。
 
 ### Inference pipelines
 
