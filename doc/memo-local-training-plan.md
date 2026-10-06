@@ -406,6 +406,48 @@ python scripts/evaluate_local_endpoint.py --n_samples 10 --max_tokens 256
 kill $(cat /tmp/llama_qwen3_8b_dpo.pid)
 ```
 
+### 6.6 生产部署实测（2026-10-06）
+
+用户已按 `doc/local-training-workflow.md` §7b 完成新服务部署：
+
+- 启动脚本：`/usr/local/lib/voxsign/run_qwen3_8b_dpo.sh`
+- systemd unit：`/etc/systemd/system/llama-qwen3-8b-dpo.service`
+- 端口：`8001`（与旧服务相同，启动前需停止 `llama-qwen38-27b`）
+- 模型别名：`qwen3-8b-dpo-q4km`
+
+验证结果：
+
+```bash
+curl -s http://127.0.0.1:8001/v1/models
+```
+
+返回：
+
+```json
+{
+  "models": [{
+    "name": "qwen3-8b-dpo-q4km",
+    "model": "qwen3-8b-dpo-q4km",
+    "details": {
+      "format": "gguf",
+      "quantization_level": "Q4_K - Medium",
+      "parameter_size": "",
+      "parent_model": ""
+    }
+  }]
+}
+```
+
+服务管理命令：
+
+```bash
+sudo systemctl status llama-qwen3-8b-dpo
+sudo journalctl -u llama-qwen3-8b-dpo -f
+sudo systemctl stop llama-qwen3-8b-dpo
+# 切回旧模型
+sudo systemctl stop llama-qwen3-8b-dpo && sudo systemctl start llama-qwen38-27b
+```
+
 ---
 
 ## 附：关键文件索引
