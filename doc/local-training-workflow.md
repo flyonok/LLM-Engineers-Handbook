@@ -197,12 +197,118 @@ sudo systemctl restart llama-qwen38-27b
 
 或新建一个 service（推荐，避免改旧脚本）：
 
+新建服务需要同时写启动脚本 + systemd unit。下面示例监听 `:8001`，与旧服务 `llama-qwen38-27b.service` 互斥，启动前确保旧服务已停。
+
+**Step 1：创建启动脚本**
+
 ```bash
-sudo cp /etc/systemd/system/llama-qwen38-27b.service /etc/systemd/system/llama-qwen3-8b.service
-# 编辑新 service，指向新 GGUF 与新启动脚本
-sudo systemctl daemon-reload
-sudo systemctl enable --now llama-qwen3-8b
+sudo tee /usr/local/lib/voxsign/run_qwen3_8b_dpo.sh >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+export LC_ALL=C
+
+MODEL_PATH=/home/ubuntu/amplifier/git/LLM-Engineers-Handbook/data/training_output/dpo_merged-Q4_K_M.gguf
+PORT=8001
+CONTEXT_SIZE=40960
+SERVED_MODEL=qwen3-8b-dpo-q4km
+
+RUNTIME_ROOT=/mnt/aitools/build/llama-b10217-sm86
+LLAMA_BIN="$RUNTIME_ROOT/bin/llama-server"
+
+[[ -r "$MODEL_PATH" ]] || { echo "Model not found: $MODEL_PATH" >&2; exit 1; }
+[[ -x "$LLAMA_BIN" ]] || { echo "llama-server not found: $LLAMA_BIN" >&2; exit 1; }
+
+export LD_LIBRARY_PATH="$RUNTIME_ROOT/bin:/usr/local/cuda-12.4/lib64:/usr/local/cuda-12.4/targets/x86_64-linux/lib"
+
+cd "$RUNTIME_ROOT"
+
+exec "$LLAMA_BIN" \
+  --model "$MODEL_PATH" \
+  --alias "$SERVED_MODEL" \
+  --host 127.0.0.1 \
+  --port "$PORT" \
+  --ctx-size "$CONTEXT_SIZE" \
+  --parallel 1 \
+  --batch-size 4096 \
+  --ubatch-size 512 \
+  --threads 8 \
+  --threads-batch 16 \
+  --n-gpu-layers 999 \
+  --flash-attn on \
+  --cache-type-k q4_0 \
+  --cache-type-v q4_0 \
+  --load-mode mmap+mlock \
+  --no-mmproj \
+  --jinja \
+  --reasoning off \
+  --temp 0.7 \
+  --top-p 0.95 \
+  --top-k 20 \
+  --min-p 0.0 \
+  --metrics \
+  --slots \
+  --no-webui \
+  --log-verbosity 2
+EOF
+sudo chmod +x /usr/local/lib/voxsign/run_qwen3_8b_dpo.sh
 ```
+
+**Step 2：创建 systemd unit**
+
+```bash
+sudo tee /etc/systemd/system/llama-qwen3-8b-dpo.service >/dev/null <<'EOF'
+[Unit]
+Description=Qwen3-8B-DPO Q4_K_M GGUF llama.cpp inference service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/mnt/aitools
+Environment=LLAMA_QWEN_PORT=8001
+ExecStart=/usr/local/lib/voxsign/run_qwen3_8b_dpo.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=1200
+TimeoutStopSec=180
+KillSignal=SIGTERM
+LimitNOFILE=65535
+LimitMEMLOCK=infinity
+LimitCORE=0
+UMask=0077
+MemoryHigh=58G
+MemoryMax=64G
+OOMPolicy=stop
+OOMScoreAdjust=500
+CPUQuota=1600%
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+**Step 3：启动并验证**
+
+```bash
+# 停止临时验证服务（如果还在跑）
+kill $(cat /tmp/llama_qwen3_8b_dpo.pid) 2>/dev/null || true
+
+# 停止旧服务，避免端口冲突
+sudo systemctl stop llama-qwen38-27b
+
+# 启动新服务
+sudo systemctl daemon-reload
+sudo systemctl enable --now llama-qwen3-8b-dpo
+
+# 验证
+curl -s http://127.0.0.1:8001/v1/models
+```
+
+> 如需同时保留旧服务，把新服务的 `PORT` 改为 `8002`，并用 `curl http://127.0.0.1:8002/v1/models` 验证。
 
 ## 8. 评估（可选，走 :8001）
 
