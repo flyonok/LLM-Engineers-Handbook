@@ -1,7 +1,7 @@
 # 项目改造备忘录：本地化训练 + 国内环境适配 + 公开数据策略
 
 > 创建日期：2026-10-03
-> 状态：**本地 Dummy SFT 已跑通**（Qwen3-8B，QLoRA，合并 16bit 已落盘；DPO/GGUF/部署待完成）
+> 状态：**本地 SFT→DPO→GGUF→:8001 闭环已完成**（Qwen3-8B QLoRA；RAG/ml_service 已可走本地 OpenAI 兼容端点）
 > 用途：记录本次讨论的全部结论与改造方案，作为后续改进项目的依据
 
 ---
@@ -447,6 +447,31 @@ sudo systemctl stop llama-qwen3-8b-dpo
 # 切回旧模型
 sudo systemctl stop llama-qwen3-8b-dpo && sudo systemctl start llama-qwen38-27b
 ```
+
+---
+
+## 第七部分：P0–P2 落地结论（2026-11-09）
+
+### 7.1 P0 切流
+
+- `:8001` 已切换为 `qwen3-8b-dpo-q4km`（`data/training_output/dpo_merged-Q4_K_M.gguf`）
+- 旧服务 `llama-qwen38-27b` 已停；因本机 `sudo` 需密码，当前由 `scripts/run_llama_server_manual.sh` 托管进程
+- 持久化 systemd：有密码后执行 `./scripts/switch_to_dpo_service.sh`（或手动 `sudo systemctl start llama-qwen3-8b-dpo`）
+
+### 7.2 P1 本地推理接入
+
+- 新增 `LLMInferenceOpenAIEndpoint` + `build_llm_inference()`
+- `USE_LOCAL_LLM_INFERENCE=true` 时 RAG/`ml_service` 走本地端点，不再依赖 SageMaker
+- SelfQuery / QueryExpansion 支持 `OPENAI_BASE_URL`
+- 重评 10 条：有效样本 accuracy **4.62** / style **4.62**（2 条 judge JSON 解析失败）
+
+### 7.3 P2 训练决策（冻结）
+
+| 决策 | 结论 | 理由 |
+|------|------|------|
+| 基座型号 | **锁定 Qwen3-8B** | 24GB 上 8B QLoRA 稳定；32B 仅作远期选项 |
+| 全量（非 dummy）重训 | **暂缓** | 管道与部署已验证；当前 dummy 产物足够联调 RAG |
+| 下一步训练触发条件 | 自有风格数据明显增加，或评测/业务明确要求更高拟合 | 再开全量 SFT→DPO，仍默认 8B |
 
 ---
 

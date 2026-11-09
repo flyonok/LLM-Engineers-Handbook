@@ -1,7 +1,12 @@
 from loguru import logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from zenml.client import Client
-from zenml.exceptions import EntityExistsError
+
+try:
+    from zenml.client import Client
+    from zenml.exceptions import EntityExistsError
+except ModuleNotFoundError:  # Optional for local-only inference / eval paths
+    Client = None  # type: ignore[assignment, misc]
+    EntityExistsError = Exception  # type: ignore[assignment, misc]
 
 
 class Settings(BaseSettings):
@@ -13,6 +18,10 @@ class Settings(BaseSettings):
     OPENAI_MODEL_ID: str = "gpt-4o-mini"
     OPENAI_API_KEY: str | None = None
     OPENAI_BASE_URL: str | None = None
+
+    # When true, RAG/ml_service calls the local OpenAI-compatible LLM instead of SageMaker.
+    USE_LOCAL_LLM_INFERENCE: bool = True
+    LOCAL_LLM_MODEL_ID: str = "qwen3-8b-dpo-q4km"
 
     # Huggingface API
     HUGGINGFACE_ACCESS_TOKEN: str | None = None
@@ -100,6 +109,10 @@ class Settings(BaseSettings):
             Settings: The initialized settings object.
         """
 
+        if Client is None:
+            logger.warning("ZenML is not installed. Loading settings from the '.env' file.")
+            return Settings()
+
         try:
             logger.info("Loading settings from the ZenML secret store.")
 
@@ -117,6 +130,9 @@ class Settings(BaseSettings):
         """
         Exports the settings to the ZenML secret store.
         """
+
+        if Client is None:
+            raise RuntimeError("ZenML is not installed; cannot export settings to the secret store.")
 
         env_vars = settings.model_dump()
         for key, value in env_vars.items():

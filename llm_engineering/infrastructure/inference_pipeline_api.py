@@ -8,7 +8,7 @@ from llm_engineering.application.rag.retriever import ContextRetriever
 from llm_engineering.application.utils import misc
 from llm_engineering.domain.embedded_chunks import EmbeddedChunk
 from llm_engineering.infrastructure.opik_utils import configure_opik
-from llm_engineering.model.inference import InferenceExecutor, LLMInferenceSagemakerEndpoint
+from llm_engineering.model.inference import InferenceExecutor, build_llm_inference
 
 configure_opik()
 
@@ -25,9 +25,7 @@ class QueryResponse(BaseModel):
 
 @opik.track
 def call_llm_service(query: str, context: str | None) -> str:
-    llm = LLMInferenceSagemakerEndpoint(
-        endpoint_name=settings.SAGEMAKER_ENDPOINT_INFERENCE, inference_component_name=None
-    )
+    llm = build_llm_inference()
     answer = InferenceExecutor(llm, query, context).execute()
 
     return answer
@@ -41,15 +39,19 @@ def rag(query: str) -> str:
 
     answer = call_llm_service(query, context)
 
+    model_id = (
+        settings.LOCAL_LLM_MODEL_ID if settings.USE_LOCAL_LLM_INFERENCE else settings.HF_MODEL_ID
+    )
     opik_context.update_current_trace(
-        tags=["rag"],
+        tags=["rag", "local-llm" if settings.USE_LOCAL_LLM_INFERENCE else "sagemaker"],
         metadata={
-            "model_id": settings.HF_MODEL_ID,
+            "model_id": model_id,
             "embedding_model_id": settings.TEXT_EMBEDDING_MODEL_ID,
             "temperature": settings.TEMPERATURE_INFERENCE,
             "query_tokens": misc.compute_num_tokens(query),
             "context_tokens": misc.compute_num_tokens(context),
             "answer_tokens": misc.compute_num_tokens(answer),
+            "use_local_llm_inference": settings.USE_LOCAL_LLM_INFERENCE,
         },
     )
 

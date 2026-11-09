@@ -41,6 +41,7 @@ You can download and use the final trained model on [Hugging Face](https://huggi
 - 训练入口：`llm_engineering/model/finetuning/run_local.py`
 - 输出：`data/training_output/sft_merged/` 和 `data/training_output/dpo_merged/`
 - 部署：转 GGUF 后接入本地 llama.cpp 服务（`:8001`）
+- 推理：`USE_LOCAL_LLM_INFERENCE=true` 时 RAG/`ml_service` 直接打本地 OpenAI 兼容端点（无需 SageMaker）
 
 详细操作文档：
 
@@ -50,7 +51,9 @@ You can download and use the final trained model on [Hugging Face](https://huggi
 快速验证已训练模型：
 
 ```bash
-# 临时启动验证服务
+# 切到 DPO 服务（需 sudo；无密码时可用下面的 manual 脚本）
+./scripts/switch_to_dpo_service.sh
+# 或临时启动：
 ./scripts/run_llama_server_manual.sh
 
 # 本地端点评估
