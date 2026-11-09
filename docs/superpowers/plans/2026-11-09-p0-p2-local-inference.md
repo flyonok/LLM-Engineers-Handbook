@@ -19,18 +19,18 @@
 
 ### Task 1: P0 service cutover
 
-- [ ] Stop `llama-qwen38-27b`, start `llama-qwen3-8b-dpo`
-- [ ] Verify `curl http://127.0.0.1:8001/v1/models` returns `qwen3-8b-dpo-q4km`
+- [x] Stop `llama-qwen38-27b`, start `llama-qwen3-8b-dpo` (manual process; systemd needs sudo password)
+- [x] Verify `curl http://127.0.0.1:8001/v1/models` returns `qwen3-8b-dpo-q4km`
 
 ### Task 2: P1 local inference client
 
-- [ ] Add settings flags for local LLM inference
-- [ ] Implement `LLMInferenceOpenAIEndpoint`
-- [ ] Route `inference_pipeline_api` + RAG ChatOpenAI helpers through local base_url
-- [ ] Update `.env.example`
+- [x] Add settings flags for local LLM inference
+- [x] Implement `LLMInferenceOpenAIEndpoint`
+- [x] Route `inference_pipeline_api` + RAG ChatOpenAI helpers through local base_url
+- [x] Update `.env.example`
 
 ### Task 3: P1 re-eval + P2 docs/push
 
-- [ ] Re-run `scripts/evaluate_local_endpoint.py`
-- [ ] Record P2 decision in `doc/memo-local-training-plan.md`
-- [ ] Push existing local commits (exclude dirty ArticleDocument.json unless intentional)
+- [x] Re-run `scripts/evaluate_local_endpoint.py` (acc/style 4.62)
+- [x] Record P2 decision in `doc/memo-local-training-plan.md`
+- [x] Push commits to origin/main (left `ArticleDocument.json` unstaged)
